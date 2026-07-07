@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ChannelType, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, RoleSelectMenuBuilder, UserSelectMenuBuilder, ChannelSelectMenuBuilder, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ChannelType, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, RoleSelectMenuBuilder, UserSelectMenuBuilder, ChannelSelectMenuBuilder, AttachmentBuilder, AuditLogEvent } = require('discord.js');
 const path = require('path');
 const { calculateRisk } = require('./risks');
 const { makeCheckEmbed } = require('./embeds');
@@ -3091,7 +3091,6 @@ client.on('interactionCreate', async interaction => {
 
 //  Message deleted event handler
 client.on('messageDelete', async message => {
-  // Ignore bot messages and system messages
   if (!message.author || message.author.bot || message.system) return;
 
   // Populate =dsnipe cache
@@ -3104,15 +3103,16 @@ client.on('messageDelete', async message => {
     });
   }
 
-  // Watchlist: auto-log deleted messages for watched users
+  // Watchlist: auto-log deleted messages for watched users (same channel, public)
   if (message.guild && message.author && await isWatched(message.guild.id, message.author.id)) {
     const content = message.content || '';
-    const attachments = [...message.attachments.values()];
-    let text = `<@${message.author.id}>: ${content || '*[no text content]*'}`;
-    if (attachments.length > 0) {
-      text += '\n' + attachments.map(a => `[${a.name}](${a.url})`).join('\n');
+    const watchAttachments = [...message.attachments.values()];
+    const watchFiles = [];
+    for (const att of watchAttachments) {
+      try { watchFiles.push(new AttachmentBuilder(att.url, { name: att.name })); } catch (_) {}
     }
-    message.channel.send(text).catch(console.error);
+    const text = `<@${message.author.id}>: ${content || '*[no text content]*'}`;
+    message.channel.send({ content: text, files: watchFiles }).catch(console.error);
   }
 
   const config = getServerConfig(message.guild.id);
@@ -3120,6 +3120,21 @@ client.on('messageDelete', async message => {
 
   const logChannel = message.guild.channels.cache.get(config.deletedLogsChannel);
   if (!logChannel) return;
+
+  // Check audit log to find who deleted the message (if it wasn't self-deleted)
+  let deletedBy = null;
+  try {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const auditLogs = await message.guild.fetchAuditLogs({ type: AuditLogEvent.MessageDelete, limit: 5 });
+    const entry = auditLogs.entries.find(e =>
+      e.target?.id === message.author.id &&
+      e.extra?.channel?.id === message.channel.id &&
+      (Date.now() - e.createdTimestamp) < 5000
+    );
+    if (entry && entry.executor?.id !== message.author.id) {
+      deletedBy = entry.executor;
+    }
+  } catch (_) {}
 
   const embed = new EmbedBuilder()
     .setTitle('Message Deleted')
@@ -3131,27 +3146,40 @@ client.on('messageDelete', async message => {
     )
     .setTimestamp();
 
+  if (deletedBy) {
+    embed.addFields({ name: 'Deleted By', value: `${deletedBy.tag} (${deletedBy.id})`, inline: false });
+  }
+
   if (message.content) {
-    embed.addFields({ 
-      name: ' Content', 
+    embed.addFields({
+      name: 'Content',
       value: message.content.length > 1024 ? `${message.content.substring(0, 1021)}...` : message.content,
-      inline: false 
+      inline: false
     });
   }
 
-  if (message.attachments.size > 0) {
-    const attachmentList = message.attachments.map(att => `[${att.name}](${att.url})`).join('\n');
-    embed.addFields({ 
-      name: ' Attachments', 
-      value: attachmentList.length > 1024 ? `${attachmentList.substring(0, 1021)}...` : attachmentList,
-      inline: false 
+  const attachments = [...message.attachments.values()];
+  const files = [];
+
+  if (attachments.length > 0) {
+    for (const att of attachments) {
+      try { files.push(new AttachmentBuilder(att.url, { name: att.name })); } catch (_) {}
+    }
+    // Display the first image inline inside the embed
+    const firstImage = attachments.find(a => /\.(png|jpe?g|gif|webp)$/i.test(a.name));
+    if (firstImage) embed.setImage(`attachment://${firstImage.name}`);
+    // List all attachment names in a field
+    embed.addFields({
+      name: `Attachments (${attachments.length})`,
+      value: attachments.map(a => a.name).join('\n').slice(0, 1024),
+      inline: false
     });
   }
 
   embed.setFooter({ text: `Message ID: ${message.id}` });
 
   try {
-    await logChannel.send({ embeds: [embed] });
+    await logChannel.send({ embeds: [embed], files });
   } catch (error) {
     console.error('Error sending deleted message log:', error);
   }
