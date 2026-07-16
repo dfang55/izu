@@ -8,6 +8,11 @@ const {
   handleTicketInteraction,
   loadTicketConfigs
 } = require('./ticket');
+const {
+  handleSmessageCommand,
+  handleSmessageModal,
+  handleSetSmessageLogsCommand
+} = require('./smessage');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
@@ -18,6 +23,7 @@ const ServerConfigSchema = new mongoose.Schema({
   editLogsChannel: { type: String, default: null },
   modLogsChannel: { type: String, default: null },
   watchLogChannel: { type: String, default: null },
+  smessageLogsChannel: { type: String, default: null },
   warnDeleteTimeout: { type: Number, default: 60 },
   quarantine: {
     enabled: { type: Boolean, default: false },
@@ -466,6 +472,19 @@ const commands = [
         .setDescription('The channel to post watch logs to')
         .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('smessage')
+    .setDescription('Send a private read-only whisper to another server member')
+    .addUserOption(option =>
+      option.setName('user')
+        .setDescription('The member to whisper')
+        .setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('setsmessagelogs')
+    .setDescription('Configure the channel where all whisper (smessage) logs are posted (Admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
 
 // Helper functions for permissions
@@ -552,6 +571,7 @@ function getServerConfig(guildId) {
       editLogsChannel: null,
       modLogsChannel: null,
       watchLogChannel: null,
+      smessageLogsChannel: null,
       warnDeleteTimeout: 60,
       quarantine: {
         enabled: false,
@@ -846,6 +866,7 @@ async function loadAllConfigs() {
         editLogsChannel: doc.editLogsChannel ?? null,
         modLogsChannel: doc.modLogsChannel ?? null,
         watchLogChannel: doc.watchLogChannel ?? null,
+        smessageLogsChannel: doc.smessageLogsChannel ?? null,
         warnDeleteTimeout: doc.warnDeleteTimeout !== undefined ? doc.warnDeleteTimeout : 60,
         quarantine: {
           enabled: doc.quarantine?.enabled ?? false,
@@ -2184,6 +2205,17 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply({ content: `Watch logs for edits and reactions will now be posted in ${channel}.` });
     }
 
+    if (commandName === 'smessage') {
+      return handleSmessageCommand(interaction);
+    }
+
+    if (commandName === 'setsmessagelogs') {
+      if (!isAdmin(interaction.member)) {
+        return interaction.reply({ content: 'You need administrator permissions to configure whisper logs.', ephemeral: false });
+      }
+      return handleSetSmessageLogsCommand(interaction);
+    }
+
     if (commandName === 'kick') {
       const target = interaction.options.getUser('user');
       const reason = interaction.options.getString('reason') || 'No reason provided';
@@ -2779,6 +2811,11 @@ client.on('interactionCreate', async interaction => {
         serverConfigs.set(guildId, config);
         saveServerConfig(guildId).catch(console.error);
         return interaction.update({ content: `Mod action logs configured for ${channel}`, embeds: [], components: [] });
+      } else if (logType === 'smessage') {
+        config.smessageLogsChannel = channelId;
+        serverConfigs.set(guildId, config);
+        saveServerConfig(guildId).catch(console.error);
+        return interaction.update({ content: `Whisper (smessage) logs configured for ${channel}`, embeds: [], components: [] });
       }
     }
   }
@@ -2830,6 +2867,11 @@ client.on('interactionCreate', async interaction => {
     saveAdvancedChannelConfig(interaction.guild.id, channelId).catch(console.error);
     const panel = buildAdvancedPanel(interaction.guild, channelId);
     return interaction.update(panel);
+  }
+
+  // Smessage (whisper) modal submission
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('smessage_compose_')) {
+    return handleSmessageModal(interaction, client, serverConfigs);
   }
 
   // Advanced config: warning timer modal submission
